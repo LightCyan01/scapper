@@ -13,6 +13,11 @@ headers = {
     "User-Agent": "FlyRankInternship A9/1.0 (+https://github.com/LightCyan01/scapper)"
 }
 
+stats = {
+    "pages_fetched": 0,
+    "cache_hits": 0
+}
+
 
 class Book(BaseModel):
     title: str
@@ -31,37 +36,63 @@ def fetch_page(url, cache_file):
 
     if os.path.exists(cache_file):
         print("CACHE HIT")
+        stats["cache_hits"] += 1
 
         with open(cache_file, "r", encoding="utf-8") as file:
             return file.read()
 
-    print("FETCH")
-    time.sleep(0.5)
+    for attempt in range(2):
+        print("FETCH")
+        time.sleep(0.5)
 
-    response = requests.get(
-        url,
-        headers=headers,
-        timeout=5
-    )
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=5
+            )
 
-    if response.status_code != 200:
+        except requests.exceptions.Timeout:
+            print("Request timed out")
+
+            if attempt == 0:
+                print("Retrying once...")
+                time.sleep(1)
+                continue
+
+            return None
+
+        if response.status_code == 200:
+            response.encoding = "utf-8"
+            html = response.text
+
+            stats["pages_fetched"] += 1
+
+            with open(cache_file, "w", encoding="utf-8") as file:
+                file.write(html)
+
+            return html
+
+        if 500 <= response.status_code < 600 and attempt == 0:
+            print(f"Server error {response.status_code}")
+            print("Retrying once...")
+            time.sleep(1)
+            continue
         print(f"Request failed {response.status_code}")
         return None
 
-    response.encoding = "utf-8"
-    html = response.text
-
-    with open(cache_file, "w", encoding="utf-8") as file:
-        file.write(html)
-
-    return html
+    return None
 
 
 def main():
+    start_time = datetime.now(timezone.utc)
+    start_clock = time.time()
+
     url = "https://books.toscrape.com/catalogue/page-1.html"
 
     discovered_books = []
     catalogue_pages = 0
+    failed_pages = []
 
     while catalogue_pages < 3:
         page_number = catalogue_pages + 1
@@ -70,6 +101,7 @@ def main():
         html = fetch_page(url, cache_file)
 
         if html is None:
+            failed_pages.append(url)
             break
 
         catalogue_pages += 1
@@ -118,6 +150,8 @@ def main():
         html = fetch_page(product_url, cache_file)
 
         if html is None:
+            failed_pages.append(product_url)
+            print(f"SKIPPED: {product_url}")
             continue
 
         soup = BeautifulSoup(html, "html.parser")
@@ -216,11 +250,32 @@ def main():
             ensure_ascii=False
         )
 
+    duration = time.time() - start_clock
+
+    run_report = {
+        "start_time": start_time.isoformat().replace("+00:00", "Z"),
+        "duration_seconds": round(duration, 2),
+        "pages_fetched": stats["pages_fetched"],
+        "cache_hits": stats["cache_hits"],
+        "valid_records": len(valid_records),
+        "invalid_records": len(errors),
+        "failed_pages": len(failed_pages)
+    }
+
+    with open(
+        "output/run-report.json",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            run_report,
+            file,
+            indent=2
+        )
+
     print()
-    print(f"valid_records={len(valid_records)}")
-    print(f"invalid_records={len(errors)}")
-    print("Saved output/books.json")
-    print("Saved output/errors.json")
+    print("RUN REPORT")
+    print(json.dumps(run_report, indent=2))
 
 
 if __name__ == "__main__":
