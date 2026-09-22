@@ -6,11 +6,24 @@ import requests
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+from pydantic import BaseModel, ValidationError
 
 
 headers = {
     "User-Agent": "FlyRankInternship A9/1.0 (+https://github.com/LightCyan01/scapper)"
 }
+
+
+class Book(BaseModel):
+    title: str
+    product_url: str
+    price_text: str
+    price_gbp: float
+    availability_text: str
+    rating_text: str
+    description: str | None
+    source_page: str
+    fetched_at: str
 
 
 def fetch_page(url, cache_file):
@@ -35,6 +48,7 @@ def fetch_page(url, cache_file):
         print(f"Request failed {response.status_code}")
         return None
 
+    response.encoding = "utf-8"
     html = response.text
 
     with open(cache_file, "w", encoding="utf-8") as file:
@@ -49,7 +63,6 @@ def main():
     discovered_books = []
     catalogue_pages = 0
 
-    # Find the books from the first 3 catalogue pages
     while catalogue_pages < 3:
         page_number = catalogue_pages + 1
         cache_file = f"cache/catalogue-page-{page_number}.html"
@@ -82,7 +95,6 @@ def main():
         next_href = next_button["href"]
         url = urljoin(url, next_href)
 
-    # Remove duplicate book URLs
     unique_books = {}
 
     for book in discovered_books:
@@ -94,8 +106,8 @@ def main():
     print(f"discovered={len(discovered_books)}")
     print(f"unique_urls={len(books)}")
 
-    # Visit all 60 book detail pages
-    records = []
+    valid_records = {}
+    errors = []
 
     for index, book in enumerate(books, start=1):
         product_url = book["product_url"]
@@ -110,11 +122,17 @@ def main():
 
         soup = BeautifulSoup(html, "html.parser")
 
-        title = soup.select_one("div.product_main h1").get_text(strip=True)
+        title = soup.select_one(
+            "div.product_main h1"
+        ).get_text(strip=True)
 
         price_text = soup.select_one(
             "div.product_main p.price_color"
         ).get_text(strip=True)
+
+        price_gbp = float(
+            price_text.replace("£", "")
+        )
 
         availability_text = soup.select_one(
             "div.product_main p.instock.availability"
@@ -122,33 +140,38 @@ def main():
 
         rating = soup.select_one("p.star-rating")
 
-        rating_text = None
+        rating_text = ""
 
-        if rating is not None:
-            for class_name in rating.get("class", []):
-                if class_name != "star-rating":
-                    rating_text = class_name
+        for class_name in rating.get("class", []):
+            if class_name != "star-rating":
+                rating_text = class_name
 
         description = None
 
-        description_heading = soup.select_one("#product_description")
+        description_heading = soup.select_one(
+            "#product_description"
+        )
 
         if description_heading is not None:
-            description_paragraph = description_heading.find_next_sibling("p")
+            description_paragraph = (
+                description_heading.find_next_sibling("p")
+            )
 
             if description_paragraph is not None:
-                description = description_paragraph.get_text(strip=True)
+                description = description_paragraph.get_text(
+                    strip=True
+                )
 
-        # Use the cache file time as the time this page was fetched
         fetched_at = datetime.fromtimestamp(
             os.path.getmtime(cache_file),
             timezone.utc
         ).isoformat().replace("+00:00", "Z")
 
-        record = {
+        raw_record = {
             "title": title,
             "product_url": product_url,
             "price_text": price_text,
+            "price_gbp": price_gbp,
             "availability_text": availability_text,
             "rating_text": rating_text,
             "description": description,
@@ -156,14 +179,48 @@ def main():
             "fetched_at": fetched_at
         }
 
-        records.append(record)
+        try:
+            validated = Book(**raw_record)
+
+            valid_records[product_url] = validated.model_dump()
+
+        except ValidationError as error:
+            errors.append({
+                "record": raw_record,
+                "reason": str(error)
+            })
+
+    os.makedirs("output", exist_ok=True)
+
+    with open(
+        "output/books.json",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            list(valid_records.values()),
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    with open(
+        "output/errors.json",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            errors,
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
 
     print()
-    print("ONE RAW RECORD:")
-    print(json.dumps(records[0], indent=2, ensure_ascii=False))
-
-    print()
-    print(f"detail_pages={len(records)}")
+    print(f"valid_records={len(valid_records)}")
+    print(f"invalid_records={len(errors)}")
+    print("Saved output/books.json")
+    print("Saved output/errors.json")
 
 
 if __name__ == "__main__":
